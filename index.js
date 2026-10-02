@@ -53,7 +53,8 @@ db.exec(`
       difficulties TEXT NOT NULL,
       comment TEXT,
       scheduled_at INTEGER NOT NULL,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      mode TEXT NOT NULL DEFAULT 'eggheist'
     );
 
     CREATE TABLE IF NOT EXISTS participants (
@@ -63,6 +64,17 @@ db.exec(`
       PRIMARY KEY (request_id, user_id)
     );
   `);
+
+  try {
+    db.exec(`
+      ALTER TABLE requests
+      ADD COLUMN mode TEXT NOT NULL DEFAULT 'eggheist'
+    `);
+  } catch (error) {
+    if (!String(error.message).includes('duplicate column name')) {
+      throw error;
+    }
+  }
 
 const CONFIG = {
   channelId: process.env.EGG_HEIST_CHANNEL_ID,
@@ -128,9 +140,37 @@ function getParticipants(id) {
     .map(row => row.user_id);
 }
 
+function getTeamParticipants(request) {
+  const allParticipants =
+    getParticipants(request.id);
+
+  const requestMode =
+    request.mode || 'eggheist';
+
+  const maxPlayers =
+    requestMode === 'holobattle'
+      ? 4
+      : 3;
+
+  const maxReserve = 2;
+
+  return {
+    main: allParticipants.slice(
+      0,
+      maxPlayers
+    ),
+
+    reserve: allParticipants.slice(
+      maxPlayers,
+      maxPlayers + maxReserve
+    )
+  };
+}
+
 function parseKyivDateTime(dateText, timeText) {
+
   const dateMatch = dateText.match(
-    /^(\d{2})\.(\d{2})\.(\d{4})$/
+    /^(\d{2})\.(\d{2})$/
   );
 
   const timeMatch = timeText.match(
@@ -143,8 +183,6 @@ function parseKyivDateTime(dateText, timeText) {
 
   const day = Number(dateMatch[1]);
   const month = Number(dateMatch[2]);
-  const year = Number(dateMatch[3]);
-
   const hour = Number(timeMatch[1]);
   const minute = Number(timeMatch[2]);
 
@@ -161,64 +199,175 @@ function parseKyivDateTime(dateText, timeText) {
     return null;
   }
 
-  const utcGuess = Date.UTC(
-    year,
-    month - 1,
-    day,
-    hour,
-    minute
+  const todayParts = new Intl.DateTimeFormat(
+    'en-US',
+    {
+      timeZone: 'Europe/Kyiv',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }
+  ).formatToParts(
+    new Date()
   );
 
-  const getKyivOffset = (timestamp) => {
-    const parts = new Intl.DateTimeFormat(
-      'en-US',
-      {
-        timeZone: 'Europe/Kyiv',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-        hourCycle: 'h23'
-      }
-    ).formatToParts(
-      new Date(timestamp)
+  const getToday = type =>
+    Number(
+      todayParts.find(
+        part => part.type === type
+      )?.value
     );
+
+  const currentYear =
+    getToday('year');
+
+  const currentMonth =
+    getToday('month');
+
+  const currentDay =
+    getToday('day');
+
+  for (
+    let yearOffset = 0;
+    yearOffset < 8;
+    yearOffset++
+  ) {
+
+    const year =
+      currentYear + yearOffset;
+
+    const daysInMonth =
+      new Date(
+        Date.UTC(
+          year,
+          month,
+          0
+        )
+      ).getUTCDate();
+
+    if (day > daysInMonth) {
+      continue;
+    }
+
+    if (
+      yearOffset === 0 &&
+      (
+        month < currentMonth ||
+        (
+          month === currentMonth &&
+          day < currentDay
+        )
+      )
+    ) {
+      continue;
+    }
+
+    const utcGuess =
+      Date.UTC(
+        year,
+        month - 1,
+        day,
+        hour,
+        minute
+      );
+
+    const getKyivOffset = timestamp => {
+
+      const parts =
+        new Intl.DateTimeFormat(
+          'en-US',
+          {
+            timeZone: 'Europe/Kyiv',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hourCycle: 'h23'
+          }
+        ).formatToParts(
+          new Date(timestamp)
+        );
+
+      const values = {};
+
+      for (const part of parts) {
+        if (part.type !== 'literal') {
+          values[part.type] =
+            Number(part.value);
+        }
+      }
+
+      const localAsUtc =
+        Date.UTC(
+          values.year,
+          values.month - 1,
+          values.day,
+          values.hour,
+          values.minute,
+          values.second
+        );
+
+      return localAsUtc - timestamp;
+    };
+
+    let timestamp =
+      utcGuess -
+      getKyivOffset(utcGuess);
+
+    timestamp =
+      utcGuess -
+      getKyivOffset(timestamp);
+
+    const check =
+      new Intl.DateTimeFormat(
+        'en-GB',
+        {
+          timeZone: 'Europe/Kyiv',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          hourCycle: 'h23'
+        }
+      ).formatToParts(
+        new Date(timestamp)
+      );
 
     const values = {};
 
-    for (const part of parts) {
+    for (const part of check) {
       if (part.type !== 'literal') {
         values[part.type] =
           Number(part.value);
       }
     }
 
-    const localAsUtc = Date.UTC(
-      values.year,
-      values.month - 1,
-      values.day,
-      values.hour,
-      values.minute,
-      values.second
-    );
+    if (
+      values.year !== year ||
+      values.month !== month ||
+      values.day !== day ||
+      values.hour !== hour ||
+      values.minute !== minute
+    ) {
+      continue;
+    }
 
-    return localAsUtc - timestamp;
-  };
+    return timestamp;
+  }
 
-  let timestamp =
-    utcGuess -
-    getKyivOffset(utcGuess);
+  return null;
+}
 
-  timestamp =
-    utcGuess -
-    getKyivOffset(timestamp);
 
-  const check = new Intl.DateTimeFormat(
-    'en-GB',
+function getHoloBattleWindow(scheduledAt) {
+  const parts = new Intl.DateTimeFormat(
+    'en-US',
     {
-      timeZone: 'Europe/Kyiv',
+      timeZone: 'Asia/Singapore',
+      weekday: 'short',
       year: 'numeric',
       month: '2-digit',
       day: '2-digit',
@@ -227,29 +376,128 @@ function parseKyivDateTime(dateText, timeText) {
       hourCycle: 'h23'
     }
   ).formatToParts(
-    new Date(timestamp)
+    new Date(scheduledAt)
   );
 
-  const values = {};
+  const get = type =>
+    parts.find(
+      part => part.type === type
+    )?.value;
 
-  for (const part of check) {
-    if (part.type !== 'literal') {
-      values[part.type] =
-        Number(part.value);
-    }
+  const year = Number(get('year'));
+  const month = Number(get('month'));
+  const day = Number(get('day'));
+  const hour = Number(get('hour'));
+  const minute = Number(get('minute'));
+
+  const weekdayMap = {
+    Sun: 0,
+    Mon: 1,
+    Tue: 2,
+    Wed: 3,
+    Thu: 4,
+    Fri: 5,
+    Sat: 6
+  };
+
+  const weekday =
+    weekdayMap[get('weekday')];
+
+  const currentMinutes =
+    hour * 60 + minute;
+
+  const startHour = 4 * 60;
+
+  /*
+   * Holo-Battle:
+   * Thursday 04:00 UTC+8
+   * until Monday 04:00 UTC+8
+   */
+
+  const isValid =
+    (
+      weekday === 4 &&
+      currentMinutes >= startHour
+    ) ||
+    weekday === 5 ||
+    weekday === 6 ||
+    weekday === 0 ||
+    (
+      weekday === 1 &&
+      currentMinutes < startHour
+    );
+
+  if (isValid) {
+    return {
+      valid: true,
+      start: scheduledAt,
+      end: scheduledAt
+    };
   }
 
-  if (
-    values.year !== year ||
-    values.month !== month ||
-    values.day !== day ||
-    values.hour !== hour ||
-    values.minute !== minute
-  ) {
-    return null;
+  let daysUntilThursday;
+
+  if (weekday === 4) {
+    daysUntilThursday = 0;
+  } else if (weekday === 5) {
+    daysUntilThursday = 6;
+  } else if (weekday === 6) {
+    daysUntilThursday = 5;
+  } else if (weekday === 0) {
+    daysUntilThursday = 4;
+  } else if (weekday === 1) {
+    daysUntilThursday = 3;
+  } else if (weekday === 2) {
+    daysUntilThursday = 2;
+  } else {
+    daysUntilThursday = 1;
   }
 
-  return timestamp;
+  /*
+   * Convert the UTC+8 calendar date
+   * into an actual UTC timestamp.
+   */
+  const date =
+    new Date(
+      Date.UTC(
+        year,
+        month - 1,
+        day
+      )
+    );
+
+  date.setUTCDate(
+    date.getUTCDate() +
+    daysUntilThursday
+  );
+
+  const start =
+    Date.UTC(
+      date.getUTCFullYear(),
+      date.getUTCMonth(),
+      date.getUTCDate(),
+      4 - 8,
+      0,
+      0,
+      0
+    );
+
+  const endDate =
+    new Date(start);
+
+  endDate.setUTCDate(
+    endDate.getUTCDate() +
+    4
+  );
+
+  const end =
+    endDate.getTime();
+
+  return {
+    valid: false,
+    start,
+    end
+  };
 }
 
 
@@ -318,6 +566,56 @@ function createRequest(data) {
   return id;
 }
 
+function createHoloBattleRequest(data) {
+  const result = db
+    .prepare(`
+      INSERT INTO requests
+        (
+          channel_id,
+          creator_id,
+          nickname,
+          servers,
+          difficulties,
+          comment,
+          scheduled_at,
+          created_at,
+          mode
+        )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    .run(
+      process.env.HOLO_BATTLE_CHANNEL_ID,
+      data.creatorId,
+      data.nickname,
+      JSON.stringify(data.servers),
+      JSON.stringify([]),
+      data.comment || '',
+      data.scheduledAt,
+      Date.now(),
+      'holobattle'
+    );
+
+  const id = Number(
+    result.lastInsertRowid
+  );
+
+  db.prepare(`
+    INSERT INTO participants
+      (
+        request_id,
+        user_id,
+        joined_at
+      )
+    VALUES (?, ?, ?)
+  `).run(
+    id,
+    data.creatorId,
+    Date.now()
+  );
+
+  return id;
+}
+
 function addParticipant(id, userId) {
   const request = getRequest(id);
 
@@ -328,16 +626,30 @@ function addParticipant(id, userId) {
     };
   }
 
-  const participants = getParticipants(id);
+  const participants =
+    getParticipants(id);
 
   if (participants.includes(userId)) {
     return {
       ok: false,
-      reason: 'already'
+      reason: 'already_joined'
     };
   }
 
-  if (participants.length >= 3) {
+  const requestMode =
+    request.mode || 'eggheist';
+
+  const maxPlayers =
+    requestMode === 'holobattle'
+      ? 4
+      : 3;
+
+  const maxReserve = 2;
+
+  const maxTotal =
+    maxPlayers + maxReserve;
+
+  if (participants.length >= maxTotal) {
     return {
       ok: false,
       reason: 'full'
@@ -345,12 +657,11 @@ function addParticipant(id, userId) {
   }
 
   db.prepare(`
-    INSERT INTO participants
-      (
-        request_id,
-        user_id,
-        joined_at
-      )
+    INSERT INTO participants (
+      request_id,
+      user_id,
+      joined_at
+    )
     VALUES (?, ?, ?)
   `).run(
     id,
@@ -403,74 +714,134 @@ function serverLabels(servers) {
 }
 
 function buildRequestEmbed(request) {
-  const servers = JSON.parse(request.servers);
-  const difficulties = JSON.parse(request.difficulties);
-  const participants = getParticipants(request.id);
+  const team =
+    getTeamParticipants(request);
 
-  const finished =
-    Date.now() >= request.scheduled_at + 60 * 60 * 1000;
+  const maxPlayers = 3;
+  const maxReserve = 2;
 
-  const participantText = participants.length
-    ? participants
-        .map(
-          (userId, index) =>
-            `${index + 1}. <@${userId}>`
-        )
-        .join('\n')
-    : 'Поки що ніхто не приєднався.';
+  const mainText =
+    team.main.length > 0
+      ? team.main
+          .map(
+            (userId, index) =>
+              `${index + 1}. <@${userId}>`
+          )
+          .join('\n')
+      : 'Поки що ніхто не приєднався.';
+
+  const reserveText =
+    team.reserve.length > 0
+      ? team.reserve
+          .map(
+            (userId, index) =>
+              `${index + 1}. <@${userId}>`
+          )
+          .join('\n')
+      : 'Поки що ніхто не стоїть у резерві.';
+
+  let servers = [];
+
+  let difficulties = [];
+
+  try {
+    servers =
+      JSON.parse(request.servers || '[]');
+  } catch {
+    servers = [];
+  }
+
+  try {
+    difficulties =
+      JSON.parse(request.difficulties || '[]');
+  } catch {
+    difficulties = [];
+  }
+
+  const serverText =
+    servers.length > 0
+      ? servers.join(', ')
+      : '—';
+
+  const difficultyText =
+    difficulties.length > 0
+      ? difficulties.join(', ')
+      : '—';
+
+  let dateText = '—';
+  let timeText = '—';
+
+  if (request.scheduled_at) {
+    const scheduledDate =
+      new Date(request.scheduled_at);
+
+    dateText =
+      scheduledDate.toLocaleDateString(
+        'uk-UA',
+        {
+          timeZone: 'Europe/Kyiv',
+          day: '2-digit',
+          month: '2-digit'
+        }
+      );
+
+    timeText =
+      scheduledDate.toLocaleTimeString(
+        'uk-UA',
+        {
+          timeZone: 'Europe/Kyiv',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false
+        }
+      );
+  }
 
   const embed = new EmbedBuilder()
-    .setTitle(
-      `🥚 Egg Heist — ${request.nickname}`
-    )
-    .setDescription(
-      finished
-        ? '🔴 **Збір завершено.**'
-        : 'Натисніть **Join**, щоб приєднатися до групи, або **Leave**, щоб вийти з неї.'
-    )
+    .setTitle('🥚 Egg Heist — пошук групи')
+    .setColor(0xF1C40F)
     .addFields(
       {
         name: '👤 Нікнейм',
-        value: request.nickname,
+        value: request.nickname || '—',
         inline: true
       },
       {
-        name: '⚔️ Складність',
-        value: difficulties.join(', '),
+        name: '📅 Дата',
+        value: dateText,
         inline: true
       },
       {
-        name: '📅 Заплановано',
-        value:
-          `${formatKyivDateTime(request.scheduled_at)} (Київ)`,
+        name: '🕐 Час за Києвом',
+        value: timeText,
+        inline: true
+      },
+      {
+        name: '🌐 Сервер',
+        value: serverText,
         inline: false
       },
       {
-        name: '⏰ Збір доступний до',
-        value:
-          `${formatKyivDateTime(
-            request.scheduled_at +
-            60 * 60 * 1000
-          )} (Київ)`,
+        name: '⚔️ Складність',
+        value: difficultyText,
+        inline: false
+      },
+      {
+        name: `👥 Основна група (${team.main.length}/${maxPlayers})`,
+        value: mainText,
+        inline: false
+      },
+      {
+        name: `🪑 Резервна черга (${team.reserve.length}/${maxReserve})`,
+        value: reserveText,
         inline: false
       },
       {
         name: '💬 Коментар',
         value: request.comment || '—',
         inline: false
-      },
-      {
-        name: `👥 Гравці (${participants.length}/3)`,
-        value: participantText,
-        inline: false
       }
-    )
-    .setFooter({
-      text:
-        finished
-          ? `Egg Heist request #${request.id} — завершено`
-          : `Egg Heist request #${request.id}`
-    });
+    );
 
   return embed;
 }
@@ -513,8 +884,165 @@ function buildButtons(
       .setEmoji('➖')
       .setStyle(
         ButtonStyle.Secondary
+      ),
+
+    new ButtonBuilder()
+      .setCustomId(
+        `delete_request:${requestId}`
+      )
+      .setLabel('Видалити')
+      .setEmoji('🗑️')
+      .setStyle(
+        ButtonStyle.Danger
       )
   );
+}
+
+function buildHoloBattleButtons(
+  requestId,
+  isFull,
+  isFinished = false
+) {
+  return new ActionRowBuilder().addComponents(
+
+    new ButtonBuilder()
+      .setCustomId(
+        `hb_join:${requestId}`
+      )
+      .setLabel(
+        isFinished
+          ? 'Збір завершено'
+          : 'Приєднатися'
+      )
+      .setEmoji(
+        isFinished
+          ? '🔴'
+          : '➕'
+      )
+      .setStyle(
+        isFinished
+          ? ButtonStyle.Secondary
+          : ButtonStyle.Success
+      )
+      .setDisabled(
+        isFull || isFinished
+      ),
+
+    new ButtonBuilder()
+      .setCustomId(
+        `hb_leave:${requestId}`
+      )
+      .setLabel('Вийти')
+      .setEmoji('➖')
+      .setStyle(
+        ButtonStyle.Secondary
+      ),
+
+    new ButtonBuilder()
+      .setCustomId(
+        `delete_request:${requestId}`
+      )
+      .setLabel('Видалити')
+      .setEmoji('🗑️')
+      .setStyle(
+        ButtonStyle.Danger
+      )
+  );
+}
+
+function buildHoloBattleEmbed(request) {
+  const team =
+    getTeamParticipants(request);
+
+  const maxPlayers = 4;
+  const maxReserve = 2;
+
+  const mainText =
+    team.main.length > 0
+      ? team.main
+          .map(
+            (userId, index) =>
+              `${index + 1}. <@${userId}>`
+          )
+          .join('\n')
+      : 'Поки що ніхто не приєднався.';
+
+  const reserveText =
+    team.reserve.length > 0
+      ? team.reserve
+          .map(
+            (userId, index) =>
+              `${index + 1}. <@${userId}>`
+          )
+          .join('\n')
+      : 'Поки що ніхто не стоїть у резерві.';
+
+  let dateText = '—';
+  let timeText = '—';
+
+  if (request.scheduled_at) {
+    const scheduledDate =
+      new Date(request.scheduled_at);
+
+    dateText =
+      scheduledDate.toLocaleDateString(
+        'uk-UA',
+        {
+          timeZone: 'Europe/Kyiv',
+          day: '2-digit',
+          month: '2-digit'
+        }
+      );
+
+    timeText =
+      scheduledDate.toLocaleTimeString(
+        'uk-UA',
+        {
+          timeZone: 'Europe/Kyiv',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false
+        }
+      );
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle('⚔️ Holo-Battle — пошук групи')
+    .setColor(0x9B59B6)
+    .addFields(
+      {
+        name: '👤 Нікнейм',
+        value: request.nickname || '—',
+        inline: true
+      },
+      {
+        name: '📅 Дата',
+        value: dateText,
+        inline: true
+      },
+      {
+        name: '🕐 Час за Києвом',
+        value: timeText,
+        inline: true
+      },
+      {
+        name: `👥 Основна група (${team.main.length}/${maxPlayers})`,
+        value: mainText,
+        inline: false
+      },
+      {
+        name: `🪑 Резервна черга (${team.reserve.length}/${maxReserve})`,
+        value: reserveText,
+        inline: false
+      },
+      {
+        name: '💬 Коментар',
+        value: request.comment || '—',
+        inline: false
+      }
+    );
+
+  return embed;
 }
 
 async function refreshRequestMessage(requestId) {
@@ -524,49 +1052,104 @@ async function refreshRequestMessage(requestId) {
     return;
   }
 
-  const channel = await client.channels.fetch(
-    request.channel_id
-  );
+  const channel =
+    await client.channels.fetch(
+      request.channel_id
+    );
 
-  if (!channel || !channel.isTextBased()) {
+  if (!channel) {
     return;
   }
 
-  const message = await channel.messages.fetch(
-    request.message_id
-  );
+  const message =
+    await channel.messages.fetch(
+      request.message_id
+    );
 
-  const participants = getParticipants(requestId);
+  if (!message) {
+    return;
+  }
 
-  const servers = JSON.parse(request.servers);
-    const isFinished =
+  const participants =
+    getParticipants(requestId);
+
+  const maxPlayers = 3;
+  const maxReserve = 2;
+  const maxTotal =
+    maxPlayers + maxReserve;
+
+  const isFull =
+    participants.length >= maxTotal;
+
+  const isFinished =
     Date.now() >=
-    request.scheduled_at +
-    60 * 60 * 1000;
+    request.scheduled_at + 60 * 60 * 1000;
 
   await message.edit({
-    content:
-      roleMentions(servers),
-
     embeds: [
       buildRequestEmbed(request)
     ],
-
     components: [
       buildButtons(
         requestId,
-        participants.length >= 3,
+        isFull,
         isFinished
       )
-    ],
+    ]
+  });
+}
 
-    allowedMentions: {
-      roles: [
-        ...servers
-          .map(server => CONFIG.roles[server])
-          .filter(Boolean)
-      ]
-    }
+async function refreshHoloBattleMessage(requestId) {
+  const request = getRequest(requestId);
+
+  if (!request || !request.message_id) {
+    return;
+  }
+
+  const channel =
+    await client.channels.fetch(
+      request.channel_id
+    );
+
+  if (!channel) {
+    return;
+  }
+
+  const message =
+    await channel.messages.fetch(
+      request.message_id
+    );
+
+  if (!message) {
+    return;
+  }
+
+  const participants =
+    getParticipants(requestId);
+
+  const maxPlayers = 4;
+  const maxReserve = 2;
+  const maxTotal =
+    maxPlayers + maxReserve;
+
+  const isFull =
+    participants.length >= maxTotal;
+
+  const isFinished =
+    Date.now() >=
+    request.scheduled_at + 60 * 60 * 1000;
+
+  await message.edit({
+    embeds: [
+      buildHoloBattleEmbed(request)
+    ],
+    components: [
+      buildHoloBattleButtons(
+        requestId,
+        isFull,
+        isFinished
+      )
+    ]
   });
 }
 
@@ -574,7 +1157,6 @@ async function refreshRequestMessage(requestId) {
 /* =========================================================
    UI
    ========================================================= */
-
 function createNicknameModal() {
   const modal = new ModalBuilder()
     .setCustomId('eh_form')
@@ -593,8 +1175,55 @@ function createNicknameModal() {
     .setLabel('Дата збору')
     .setStyle(TextInputStyle.Short)
     .setRequired(true)
-    .setMaxLength(10)
-    .setPlaceholder('05.10.2026');
+    .setMaxLength(5)
+    .setPlaceholder('05.10');
+
+  const time = new TextInputBuilder()
+    .setCustomId('time')
+    .setLabel('Час збору за Києвом')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(5)
+    .setPlaceholder('16:00');
+
+  const comment = new TextInputBuilder()
+    .setCustomId('comment')
+    .setLabel('Коментар')
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(false)
+    .setMaxLength(500)
+    .setPlaceholder('Щось, що мають знати напарники?');
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(nickname),
+    new ActionRowBuilder().addComponents(date),
+    new ActionRowBuilder().addComponents(time),
+    new ActionRowBuilder().addComponents(comment)
+  );
+
+  return modal;
+}
+
+function createHoloBattleModal() {
+  const modal = new ModalBuilder()
+    .setCustomId('hb_form')
+    .setTitle('Holo-Battle Interlink');
+
+  const nickname = new TextInputBuilder()
+    .setCustomId('nickname')
+    .setLabel('Нікнейм')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(32)
+    .setPlaceholder('Ваш нікнейм у грі');
+
+  const date = new TextInputBuilder()
+    .setCustomId('date')
+    .setLabel('Дата збору')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(5)
+    .setPlaceholder('05.10');
 
   const time = new TextInputBuilder()
     .setCustomId('time')
@@ -640,6 +1269,24 @@ function createServerSelect() {
   );
 }
 
+function createHoloBattleServerSelect() {
+  return new ActionRowBuilder().addComponents(
+
+    new StringSelectMenuBuilder()
+      .setCustomId('hb_servers')
+      .setPlaceholder('Оберіть сервер(и)')
+      .setMinValues(1)
+      .setMaxValues(3)
+
+      .addOptions(
+        SERVERS.map(server => ({
+          label: server.label,
+          value: server.value
+        }))
+      )
+  );
+}
+
 function createDifficultySelect(selectedValues = []) {
   return new ActionRowBuilder().addComponents(
 
@@ -667,6 +1314,17 @@ function createPanelRow() {
       .setCustomId('eh_start')
       .setLabel('Знайти команду Egg Heist')
       .setEmoji('🥚')
+      .setStyle(ButtonStyle.Primary)
+  );
+}
+
+function createHoloBattlePanelRow() {
+  return new ActionRowBuilder().addComponents(
+
+    new ButtonBuilder()
+      .setCustomId('hb_start')
+      .setLabel('Знайти команду Holo-Battle Interlink')
+      .setEmoji('⚔️')
       .setStyle(ButtonStyle.Primary)
   );
 }
@@ -749,6 +1407,21 @@ const commands = [
     )
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageGuild.toString()
+    ),
+
+  new SlashCommandBuilder()
+    .setName('holobattle')
+    .setDescription(
+      'Створити заявку на команду Holo-Battle Interlink.'
+    ),
+
+  new SlashCommandBuilder()
+    .setName('holobattle-panel')
+    .setDescription(
+      'Опублікувати кнопку створення заявки Holo-Battle Interlink у цьому каналі.'
+    )
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.ManageGuild.toString()
     )
 ];
 
@@ -808,6 +1481,21 @@ client.on(
         return;
       }
 
+      /* ---------------------------------------------
+         /holobattle
+         --------------------------------------------- */
+
+      if (
+        interaction.isChatInputCommand() &&
+        interaction.commandName === 'holobattle'
+      ) {
+
+        await interaction.showModal(
+          createHoloBattleModal()
+        );
+
+        return;
+      }      
 
       /* ---------------------------------------------
          /eggheist-panel
@@ -854,6 +1542,50 @@ client.on(
         return;
       }
 
+      /* ---------------------------------------------
+         /holobattle-panel
+         --------------------------------------------- */
+
+      if (
+        interaction.isChatInputCommand() &&
+        interaction.commandName === 'holobattle-panel'
+      ) {
+
+        const channel = await client.channels.fetch(
+          process.env.HOLO_BATTLE_CHANNEL_ID
+        );
+
+        if (!channel || !channel.isTextBased()) {
+          throw new Error(
+            'EGG_HEIST_CHANNEL_ID is not a valid text channel.'
+          );
+        }
+
+        await channel.send({
+
+          embeds: [
+            new EmbedBuilder()
+              .setTitle(
+                '⚔️ Holo-Battle Interlink — Знайти команду'
+              )
+              .setDescription(
+                'Натисніть кнопку нижче та створіть заявку на збір.'
+              )
+          ],
+
+          components: [
+            createHoloBattlePanelRow()
+          ]
+        });
+
+        await interaction.reply({
+          content:
+            `✅ Панель Holo-Battle Interlink опубліковано в <#${CONFIG.channelId}>.`,
+          flags: MessageFlags.Ephemeral
+        });
+
+        return;
+      }
 
       /* ---------------------------------------------
          PANEL BUTTON
@@ -871,6 +1603,21 @@ client.on(
         return;
       }
 
+      /* ---------------------------------------------
+         HOLO-BATTLE PANEL BUTTON
+         --------------------------------------------- */
+
+      if (
+        interaction.isButton() &&
+        interaction.customId === 'hb_start'
+      ) {
+
+        await interaction.showModal(
+          createHoloBattleModal()
+        );
+
+        return;
+      }      
 
       /* ---------------------------------------------
          MODAL SUBMIT
@@ -900,7 +1647,7 @@ client.on(
         if (!scheduledAt) {
           await interaction.reply({
             content:
-              '❌ Неправильна дата або час.\n\nВикористовуйте формат:\n`05.10.2026` та `16:00`.',
+              '❌ Неправильна дата або час.\n\nВикористовуйте формат:\n`05.10` та `16:00`.',
             flags:
               MessageFlags.Ephemeral
           });
@@ -976,6 +1723,364 @@ client.on(
         return;
       }
 
+      /* ---------------------------------------------
+         HOLO-BATTLE MODAL SUBMIT
+         --------------------------------------------- */
+
+      if (
+        interaction.isModalSubmit() &&
+        interaction.customId === 'hb_form'
+      ) {
+
+        const nickname =
+          interaction.fields
+            .getTextInputValue('nickname')
+            .trim();
+
+        const date =
+          interaction.fields
+            .getTextInputValue('date')
+            .trim();
+
+        const time =
+          interaction.fields
+            .getTextInputValue('time')
+            .trim();
+
+        const comment =
+          interaction.fields
+            .getTextInputValue('comment')
+            .trim();
+
+        const scheduledAt =
+          parseKyivDateTime(
+            date,
+            time
+          );
+
+        if (!scheduledAt) {
+
+          await interaction.reply({
+            content:
+              '❌ Неправильна дата або час.\n\nВикористовуйте формат:\n`05.10` та `16:00`.',
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+          return;
+        }
+
+        if (
+          scheduledAt <= Date.now()
+        ) {
+
+          await interaction.reply({
+            content:
+              '❌ Запланований час уже минув. Вкажіть майбутній час.',
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+          return;
+        }
+
+        const holoWindow =
+          getHoloBattleWindow(
+            scheduledAt
+          );
+
+        if (!holoWindow.valid) {
+
+          await interaction.reply({
+            content:
+              `❌ Цей час не підходить для Holo-Battle Interlink.\n\n` +
+              `Збір доступний з четверга 04:00 UTC+8 до понеділка 03:59 UTC+8.\n\n` +
+              `📅 Найближче доступне вікно за Києвом:\n` +
+              `**${formatKyivDateTime(holoWindow.start)} — ${formatKyivDateTime(holoWindow.end)}**\n\n` +
+              `Будь ласка, вкажіть дату та час у цьому проміжку.`,
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+          return;
+        }
+
+        pending.set(
+          interaction.user.id,
+          {
+            mode: 'holobattle',
+            creatorId:
+              interaction.user.id,
+            nickname,
+            scheduledAt,
+            comment,
+            servers: []
+          }
+        );
+
+        await interaction.reply({
+          content:
+            '### 1/2 — Оберіть сервер(и):',
+
+          components: [
+
+            createHoloBattleServerSelect(),
+
+            new ActionRowBuilder().addComponents(
+
+              new ButtonBuilder()
+                .setCustomId(
+                  `hb_next:${interaction.user.id}`
+                )
+                .setLabel('Далі')
+                .setStyle(
+                  ButtonStyle.Primary
+                )
+
+            )
+
+          ],
+
+          flags:
+            MessageFlags.Ephemeral
+        });
+
+        return;
+      }
+
+      /* ---------------------------------------------
+         HOLO-BATTLE SERVER SELECT
+         --------------------------------------------- */
+
+      if (
+        interaction.isStringSelectMenu() &&
+        interaction.customId === 'hb_servers'
+      ) {
+
+        const data =
+          pending.get(
+            interaction.user.id
+          );
+
+        if (
+          !data ||
+          data.mode !== 'holobattle'
+        ) {
+
+          await interaction.reply({
+            content:
+              '❌ Дані заявки більше недоступні. Створіть заявку ще раз.',
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+          return;
+        }
+
+        data.servers =
+          interaction.values;
+
+        await interaction.deferUpdate();
+
+        return;
+      }
+
+      /* ---------------------------------------------
+         HOLO-BATTLE CONTINUE
+         --------------------------------------------- */
+
+      if (
+        interaction.isButton() &&
+        interaction.customId.startsWith(
+          'hb_next:'
+        )
+      ) {
+
+        const userId =
+          interaction.customId.slice(
+            'hb_next:'.length
+          );
+
+        const data =
+          pending.get(userId);
+
+        if (
+          !data ||
+          data.mode !== 'holobattle' ||
+          data.creatorId !== interaction.user.id
+        ) {
+
+          await interaction.reply({
+            content:
+              '❌ Дані заявки більше недоступні. Створіть заявку ще раз.',
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+          return;
+        }
+
+        if (
+          !data.servers ||
+          data.servers.length === 0
+        ) {
+
+          await interaction.reply({
+            content:
+              '❌ Будь ласка, оберіть хоча б один сервер.',
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+          return;
+        }
+
+        await interaction.update({
+          content:
+            '### Сервери обрано.\n\n' +
+            'Натисніть кнопку нижче, щоб створити заявку.',
+          components: [
+            new ActionRowBuilder().addComponents(
+
+              new ButtonBuilder()
+                .setCustomId(
+                  'hb_create'
+                )
+                .setLabel(
+                  'Створити заявку'
+                )
+                .setEmoji('⚔️')
+                .setStyle(
+                  ButtonStyle.Success
+                )
+
+            )
+          ]
+        });
+
+        return;
+      }      
+
+            /* ---------------------------------------------
+         HOLO-BATTLE CREATE REQUEST
+         --------------------------------------------- */
+
+      if (
+        interaction.isButton() &&
+        interaction.customId === 'hb_create'
+      ) {
+
+        const data =
+          pending.get(
+            interaction.user.id
+          );
+
+        if (
+          !data ||
+          data.mode !== 'holobattle'
+        ) {
+
+          await interaction.reply({
+            content:
+              '❌ Дані заявки більше недоступні. Створіть заявку ще раз.',
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+          return;
+        }
+
+                if (
+          !data.servers ||
+          data.servers.length === 0
+        ) {
+
+          await interaction.reply({
+            content:
+              '❌ Будь ласка, оберіть хоча б один сервер.',
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+          return;
+        }
+
+        const id =
+          createHoloBattleRequest(
+            data
+          );
+
+        const request =
+          getRequest(id);
+
+        const channel =
+          await client.channels.fetch(
+            process.env.HOLO_BATTLE_CHANNEL_ID
+          );
+
+        if (
+          !channel ||
+          !channel.isTextBased()
+        ) {
+          throw new Error(
+            'HOLO_BATTLE_CHANNEL_ID is not a text channel.'
+          );
+        }
+
+        const message =
+          await channel.send({
+
+            content:
+              roleMentions(
+                data.servers
+              ),
+
+            embeds: [
+              buildHoloBattleEmbed(
+                request
+              )
+            ],
+
+            components: [
+              buildHoloBattleButtons(
+                id,
+                false
+              )
+            ],
+
+            allowedMentions: {
+              roles: [
+                ...data.servers
+                  .map(
+                    server =>
+                      CONFIG.roles[server]
+                  )
+                  .filter(Boolean)
+              ]
+            }
+          });
+
+        db.prepare(`
+          UPDATE requests
+          SET message_id = ?
+          WHERE id = ?
+        `).run(
+          message.id,
+          id
+        );
+
+        pending.delete(
+          interaction.user.id
+        );
+
+        await interaction.update({
+          content:
+            `✅ Вашу заявку Holo-Battle Interlink опубліковано в <#${process.env.HOLO_BATTLE_CHANNEL_ID}>.`,
+          components: []
+        });
+
+        return;
+      }
 
       /* ---------------------------------------------
          SERVER SELECT
@@ -1244,6 +2349,211 @@ client.on(
         return;
       }
 
+      /* ---------------------------------------------
+         DELETE REQUEST
+         --------------------------------------------- */
+
+      if (
+        interaction.isButton() &&
+        interaction.customId.startsWith(
+          'delete_request:'
+        )
+      ) {
+
+        const id =
+          Number(
+            interaction.customId.split(':')[1]
+          );
+
+        const request =
+          getRequest(id);
+
+        if (!request) {
+
+          await interaction.reply({
+            content:
+              '❌ Ця заявка більше не існує.',
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+          return;
+        }
+
+        if (
+          request.creator_id !==
+          interaction.user.id
+        ) {
+
+          await interaction.reply({
+            content:
+              '❌ Видалити заявку може тільки її автор.',
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+          return;
+        }
+
+        await interaction.reply({
+          content:
+            '⚠️ **Ви точно хочете видалити цю заявку?**\n\n' +
+            'Це видалить пост і всіх учасників заявки.',
+
+          components: [
+            new ActionRowBuilder().addComponents(
+
+              new ButtonBuilder()
+                .setCustomId(
+                  `delete_confirm:${id}`
+                )
+                .setLabel(
+                  'Так, видалити'
+                )
+                .setEmoji('🗑️')
+                .setStyle(
+                  ButtonStyle.Danger
+                ),
+
+              new ButtonBuilder()
+                .setCustomId(
+                  `delete_cancel:${id}`
+                )
+                .setLabel(
+                  'Скасувати'
+                )
+                .setEmoji('↩️')
+                .setStyle(
+                  ButtonStyle.Secondary
+                )
+
+            )
+          ],
+
+          flags:
+            MessageFlags.Ephemeral
+        });
+
+        return;
+      }
+
+      /* ---------------------------------------------
+         CONFIRM DELETE REQUEST
+         --------------------------------------------- */
+
+      if (
+        interaction.isButton() &&
+        interaction.customId.startsWith(
+          'delete_confirm:'
+        )
+      ) {
+
+        const id =
+          Number(
+            interaction.customId.split(':')[1]
+          );
+
+        const request =
+          getRequest(id);
+
+        if (!request) {
+
+          await interaction.update({
+            content:
+              '❌ Ця заявка більше не існує.',
+            components: []
+          });
+
+          return;
+        }
+
+        if (
+          request.creator_id !==
+          interaction.user.id
+        ) {
+
+          await interaction.update({
+            content:
+              '❌ Видалити заявку може тільки її автор.',
+            components: []
+          });
+
+          return;
+        }
+
+        try {
+
+          const channel =
+            await client.channels.fetch(
+              request.channel_id
+            );
+
+          if (
+            channel &&
+            channel.isTextBased() &&
+            request.message_id
+          ) {
+
+            const message =
+              await channel.messages.fetch(
+                request.message_id
+              );
+
+            await message.delete();
+          }
+
+          db.prepare(`
+            DELETE FROM participants
+            WHERE request_id = ?
+          `).run(id);
+
+          db.prepare(`
+            DELETE FROM requests
+            WHERE id = ?
+          `).run(id);
+
+          await interaction.update({
+            content:
+              '🗑️ Заявку успішно видалено.',
+            components: []
+          });
+
+        } catch (error) {
+
+          console.error(
+            'Failed to delete request:',
+            error
+          );
+
+          await interaction.update({
+            content:
+              '❌ Не вдалося видалити заявку. Перевірте консоль бота.',
+            components: []
+          });
+        }
+
+        return;
+      }
+
+      /* ---------------------------------------------
+         CANCEL DELETE REQUEST
+         --------------------------------------------- */
+
+      if (
+        interaction.isButton() &&
+        interaction.customId.startsWith(
+          'delete_cancel:'
+        )
+      ) {
+
+        await interaction.update({
+          content:
+            '↩️ Видалення скасовано.',
+          components: []
+        });
+
+        return;
+      }
 
       /* ---------------------------------------------
          JOIN / LEAVE
@@ -1322,7 +2632,7 @@ client.on(
                 'Ви вже в цій групі.',
 
               full:
-                'Ця група вже заповнена (3/3).'
+                'Основна група та резервна черга вже заповнені.'
             };
 
             await interaction.reply({
@@ -1338,9 +2648,32 @@ client.on(
             return;
           }
 
-          await interaction.deferUpdate();
+          const updatedRequest =
+            getRequest(id);
 
-          await refreshRequestMessage(id);
+          const updatedParticipants =
+            getParticipants(id);
+
+          const isFull =
+            updatedParticipants.length >= 5;
+
+          const isFinished =
+            Date.now() >=
+            updatedRequest.scheduled_at +
+            60 * 60 * 1000;
+
+          await interaction.update({
+            embeds: [
+              buildRequestEmbed(updatedRequest)
+            ],
+            components: [
+              buildButtons(
+                id,
+                isFull,
+                isFinished
+              )
+            ]
+          });
 
           return;
         }
@@ -1370,13 +2703,229 @@ client.on(
             return;
           }
 
-          await interaction.deferUpdate();
+          const updatedRequest =
+            getRequest(id);
 
-          await refreshRequestMessage(id);
+          const updatedParticipants =
+            getParticipants(id);
+
+          const isFull =
+            updatedParticipants.length >= 5;
+
+          const isFinished =
+            Date.now() >=
+            updatedRequest.scheduled_at +
+            60 * 60 * 1000;
+
+          await interaction.update({
+            embeds: [
+              buildRequestEmbed(updatedRequest)
+            ],
+            components: [
+              buildButtons(
+                id,
+                isFull,
+                isFinished
+              )
+            ]
+          });
 
           return;
         }
       }
+
+      /* ---------------------------------------------
+         HOLO-BATTLE JOIN / LEAVE
+         --------------------------------------------- */
+
+      if (
+        interaction.isButton() &&
+        (
+          interaction.customId.startsWith('hb_join:') ||
+          interaction.customId.startsWith('hb_leave:')
+        )
+      ) {
+
+        const [
+          action,
+          idText
+        ] =
+          interaction.customId.split(':');
+
+        const id =
+          Number(idText);
+
+        const request =
+          getRequest(id);
+
+        if (!request) {
+
+          await interaction.reply({
+            content:
+              '❌ Ця заявка більше не існує.',
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+          return;
+        }
+
+        if (
+          Date.now() >=
+          request.scheduled_at +
+          60 * 60 * 1000
+        ) {
+
+          await interaction.reply({
+            content:
+              '🔴 Збір уже завершено. Приєднання більше недоступне.',
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+          await refreshHoloBattleMessage(id);
+
+          return;
+        }
+
+        const participants =
+          getParticipants(id);
+
+        /* JOIN */
+
+        if (action === 'hb_join') {
+
+          if (
+            participants.includes(
+              interaction.user.id
+            )
+          ) {
+
+            await interaction.reply({
+              content:
+                '❌ Ви вже є в цій групі.',
+              flags:
+                MessageFlags.Ephemeral
+            });
+
+            return;
+          }
+
+          if (
+            participants.length >= 2
+          ) {
+
+            await interaction.reply({
+              content:
+                '❌ Основна група та резервна черга вже заповнені.',
+              flags:
+                MessageFlags.Ephemeral
+            });
+
+            return;
+          }
+
+          db.prepare(`
+            INSERT INTO participants
+              (
+                request_id,
+                user_id,
+                joined_at
+              )
+            VALUES (?, ?, ?)
+          `).run(
+            id,
+            interaction.user.id,
+            Date.now()
+          );
+
+          const updatedRequest =
+            getRequest(id);
+
+          const updatedParticipants =
+            getParticipants(id);
+
+          const isFull =
+            updatedParticipants.length >= 6;
+
+          const isFinished =
+            Date.now() >=
+            updatedRequest.scheduled_at +
+            60 * 60 * 1000;
+
+          await interaction.update({
+            embeds: [
+              buildHoloBattleEmbed(
+                updatedRequest
+              )
+            ],
+            components: [
+              buildHoloBattleButtons(
+                id,
+                isFull,
+                isFinished
+              )
+            ]
+          });
+
+          return;
+        }
+
+        /* LEAVE */
+
+        if (action === 'hb_leave') {
+
+          const removed =
+            removeParticipant(
+              id,
+              interaction.user.id
+            );
+
+          if (!removed) {
+
+            await interaction.reply({
+              content:
+                '❌ Ви не перебуваєте в цій групі.',
+              flags:
+                MessageFlags.Ephemeral
+            });
+
+            return;
+          }
+
+          const updatedRequest =
+            getRequest(id);
+
+          const updatedParticipants =
+            getParticipants(id);
+
+          const isFull =
+            updatedParticipants.length >= 6;
+
+          const isFinished =
+            Date.now() >=
+            updatedRequest.scheduled_at +
+            60 * 60 * 1000;
+
+          await interaction.update({
+            embeds: [
+              buildHoloBattleEmbed(
+                updatedRequest
+              )
+            ],
+            components: [
+              buildHoloBattleButtons(
+                id,
+                isFull,
+                isFinished
+              )
+            ]
+          });
+
+          return;
+        }
+      }
+      
 
     } catch (error) {
 
@@ -1506,9 +3055,20 @@ setInterval(
         if (now >= finishedAt) {
 
           try {
-            await refreshRequestMessage(
-              request.id
-            );
+
+            if (request.mode === 'holobattle') {
+
+              await refreshHoloBattleMessage(
+                request.id
+              );
+
+            } else {
+
+              await refreshRequestMessage(
+                request.id
+              );
+
+            }
 
           } catch (error) {
 
