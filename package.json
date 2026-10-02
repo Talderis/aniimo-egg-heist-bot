@@ -1,0 +1,17 @@
+{
+  "name": "aniimo-egg-heist-bot",
+  "version": "1.0.0",
+  "description": "Aniimo Egg Heist LFG Discord bot",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=24.17.0"
+  },
+  "dependencies": {
+    "discord.js": "^14.19.3",
+    "dotenv": "^17.2.2"
+  }
+}
