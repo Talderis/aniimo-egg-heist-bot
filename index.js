@@ -14,6 +14,7 @@ import {
   TextInputBuilder,
   TextInputStyle,
   EmbedBuilder,
+  AttachmentBuilder,
   MessageFlags,
   PermissionFlagsBits
 } from 'discord.js';
@@ -29,7 +30,8 @@ const required = [
   'EGG_HEIST_ROLE_ID',
   'EUROPE_ROLE_ID',
   'AMERICAS_ROLE_ID',
-  'APAC_ROLE_ID'
+  'APAC_ROLE_ID',
+  'PROFILE_CHANNEL_ID'
 ];
 
 for (const name of required) {
@@ -62,6 +64,19 @@ db.exec(`
       user_id TEXT NOT NULL,
       joined_at INTEGER NOT NULL,
       PRIMARY KEY (request_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS profiles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL,
+      nickname TEXT NOT NULL,
+      aniimo_id TEXT NOT NULL,
+      servers TEXT NOT NULL,
+      level TEXT NOT NULL,
+      about TEXT NOT NULL,
+      message_id TEXT,
+      photo_url TEXT,
+      created_at INTEGER NOT NULL
     );
   `);
 
@@ -111,11 +126,17 @@ const DIFFICULTIES = [
 
 const client = new Client({
   intents: [
-    GatewayIntentBits.Guilds
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
   ]
 });
 
 const pending = new Map();
+
+const pendingProfiles = new Map();
+
+const waitingForProfilePhoto = new Map();
 
 
 /* =========================================================
@@ -1061,10 +1082,20 @@ async function refreshRequestMessage(requestId) {
     return;
   }
 
-  const message =
-    await channel.messages.fetch(
+  let message;
+
+  try {
+    message = await channel.messages.fetch(
       request.message_id
     );
+  } catch (error) {
+
+    if (error.code === 10008) {
+      return;
+    }
+
+    throw error;
+  }
 
   if (!message) {
     return;
@@ -1115,10 +1146,20 @@ async function refreshHoloBattleMessage(requestId) {
     return;
   }
 
-  const message =
-    await channel.messages.fetch(
+  let message;
+
+  try {
+    message = await channel.messages.fetch(
       request.message_id
     );
+  } catch (error) {
+
+    if (error.code === 10008) {
+      return;
+    }
+
+    throw error;
+  }
 
   if (!message) {
     return;
@@ -1251,6 +1292,53 @@ function createHoloBattleModal() {
   return modal;
 }
 
+function createProfileModal() {
+  const modal = new ModalBuilder()
+    .setCustomId('profile_form')
+    .setTitle('Анкета гравця Aniimo');
+
+  const nickname = new TextInputBuilder()
+    .setCustomId('nickname')
+    .setLabel('Нікнейм')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(32)
+    .setPlaceholder('Ваш нікнейм у грі');
+
+  const aniimoId = new TextInputBuilder()
+    .setCustomId('aniimo_id')
+    .setLabel('ID в Aniimo')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(32)
+    .setPlaceholder('Ваш ID у грі');
+
+  const level = new TextInputBuilder()
+    .setCustomId('level')
+    .setLabel('Рівень')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(20)
+    .setPlaceholder('Наприклад: 50');
+
+  const about = new TextInputBuilder()
+    .setCustomId('about')
+    .setLabel('Про себе')
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(true)
+    .setMaxLength(4000)
+    .setPlaceholder('Розкажіть трохи про себе, свій стиль гри та кого шукаєте');
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(nickname),
+    new ActionRowBuilder().addComponents(aniimoId),
+    new ActionRowBuilder().addComponents(level),
+    new ActionRowBuilder().addComponents(about)
+  );
+
+  return modal;
+}
+
 function createServerSelect() {
   return new ActionRowBuilder().addComponents(
 
@@ -1287,6 +1375,35 @@ function createHoloBattleServerSelect() {
   );
 }
 
+function createProfileServerSelect() {
+  return new ActionRowBuilder().addComponents(
+
+    new StringSelectMenuBuilder()
+      .setCustomId('profile_server')
+      .setPlaceholder('Оберіть сервер(и)')
+      .setMinValues(1)
+      .setMaxValues(3)
+
+      .addOptions(
+        {
+          label: 'Europe',
+          value: 'Europe',
+          emoji: '🇪🇺'
+        },
+        {
+          label: 'Apac',
+          value: 'Apac',
+          emoji: '🌏'
+        },
+        {
+          label: 'Americas',
+          value: 'Americas',
+          emoji: '🌎'
+        }
+      )
+  );
+}
+
 function createDifficultySelect(selectedValues = []) {
   return new ActionRowBuilder().addComponents(
 
@@ -1314,6 +1431,17 @@ function createPanelRow() {
       .setCustomId('eh_start')
       .setLabel('Знайти команду Egg Heist')
       .setEmoji('🥚')
+      .setStyle(ButtonStyle.Primary)
+  );
+}
+
+function createProfilePanelRow() {
+  return new ActionRowBuilder().addComponents(
+
+    new ButtonBuilder()
+      .setCustomId('profile_create')
+      .setLabel('Створити анкету')
+      .setEmoji('📝')
       .setStyle(ButtonStyle.Primary)
   );
 }
@@ -1387,42 +1515,222 @@ async function publishRequest(data, interaction) {
   });
 }
 
+/* =========================================================
+   PUBLISH PROFILE
+   ========================================================= */
+
+async function publishProfile(
+  data,
+  interaction,
+  photoFile = null
+) {
+  const channel =
+    await client.channels.fetch(
+      process.env.PROFILE_CHANNEL_ID
+    );
+
+  if (!channel || !channel.isTextBased()) {
+    throw new Error(
+      'PROFILE_CHANNEL_ID is not a text channel.'
+    );
+  }
+
+  const embed =
+    new EmbedBuilder()
+      .setTitle('👤 Анкета гравця Aniimo')
+      .setColor(0x5865F2)
+      .setDescription(
+        `**💬 Про себе**\n${data.about}`
+      )
+      .addFields(
+        {
+          name: '👤 Нікнейм',
+          value: data.nickname,
+          inline: true
+        },
+        {
+          name: '🆔 ID в Aniimo',
+          value: data.aniimoId,
+          inline: true
+        },
+        {
+          name: '⭐ Рівень',
+          value: data.level,
+          inline: true
+        },
+        {
+          name: '🌐 Сервер',
+          value: data.servers.join(', '),
+          inline: false
+        }
+      )
+      .setFooter({
+        text: 'Aniimo Community'
+      });
+
+const sendOptions = {
+  embeds: [embed],
+
+  components: [
+
+    new ActionRowBuilder().addComponents(
+
+      new ButtonBuilder()
+        .setLabel('Написати')
+        .setEmoji('💬')
+        .setStyle(
+          ButtonStyle.Link
+        )
+        .setURL(
+          `https://discord.com/users/${data.userId}`
+        ),
+
+      new ButtonBuilder()
+        .setCustomId(
+          `profile_delete:${data.userId}`
+        )
+        .setLabel('Видалити анкету')
+        .setEmoji('🗑️')
+        .setStyle(
+          ButtonStyle.Danger
+        )
+
+    )
+
+  ]
+};
+
+  if (photoFile) {
+    embed.setImage(
+      `attachment://${photoFile.name}`
+    );
+
+    sendOptions.files = [photoFile];
+  }
+
+  const message =
+    await channel.send(sendOptions);
+
+  let photoUrl = null;
+
+  if (photoFile) {
+    photoUrl =
+      message.attachments.first()?.url || null;
+  }
+
+  db.prepare(`
+    INSERT INTO profiles
+      (
+        user_id,
+        nickname,
+        aniimo_id,
+        servers,
+        level,
+        about,
+        message_id,
+        photo_url,
+        created_at
+      )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    data.userId,
+    data.nickname,
+    data.aniimoId,
+    JSON.stringify(data.servers),
+    data.level,
+    data.about,
+    message.id,
+    photoUrl,
+    Date.now()
+  );
+
+  pendingProfiles.delete(
+    data.userId
+  );
+
+  waitingForProfilePhoto.delete(
+    data.userId
+  );
+
+  return message;
+}
 
 /* =========================================================
+
    SLASH COMMAND REGISTRATION
+
    ========================================================= */
 
 const commands = [
 
   new SlashCommandBuilder()
+
     .setName('eggheist')
+
     .setDescription(
+
       'Створити заявку на команду Egg Heist.'
+
     ),
 
   new SlashCommandBuilder()
+
     .setName('eggheist-panel')
+
     .setDescription(
+
       'Опублікувати кнопку створення заявки Egg Heist у цьому каналі.'
+
     )
+
     .setDefaultMemberPermissions(
+
       PermissionFlagsBits.ManageGuild.toString()
+
     ),
 
   new SlashCommandBuilder()
+
     .setName('holobattle')
+
     .setDescription(
+
       'Створити заявку на команду Holo-Battle Interlink.'
+
     ),
 
   new SlashCommandBuilder()
+
     .setName('holobattle-panel')
+
     .setDescription(
+
       'Опублікувати кнопку створення заявки Holo-Battle Interlink у цьому каналі.'
+
     )
+
     .setDefaultMemberPermissions(
+
       PermissionFlagsBits.ManageGuild.toString()
+
+    ),
+
+  new SlashCommandBuilder()
+
+    .setName('profile-panel')
+
+    .setDescription(
+
+      'Опублікувати панель створення анкети гравця.'
+
     )
+
+    .setDefaultMemberPermissions(
+
+      PermissionFlagsBits.ManageGuild.toString()
+
+    )
+
 ];
 
 const rest = new REST({
@@ -1587,6 +1895,51 @@ client.on(
         return;
       }
 
+            /* ---------------------------------------------
+         /profile-panel
+         --------------------------------------------- */
+
+      if (
+        interaction.isChatInputCommand() &&
+        interaction.commandName === 'profile-panel'
+      ) {
+
+        const channel = await client.channels.fetch(
+          process.env.PROFILE_CHANNEL_ID
+        );
+
+        if (!channel || !channel.isTextBased()) {
+          throw new Error(
+            'PROFILE_CHANNEL_ID is not a valid text channel.'
+          );
+        }
+
+        await channel.send({
+
+          embeds: [
+            new EmbedBuilder()
+              .setTitle(
+                '📝 Анкети гравців Aniimo'
+              )
+              .setDescription(
+                'Хочете знайти напарників для спільної гри? Заповніть коротку анкету нижче.'
+              )
+          ],
+
+          components: [
+            createProfilePanelRow()
+          ]
+        });
+
+        await interaction.reply({
+          content:
+            `✅ Панель анкет опубліковано в <#${process.env.PROFILE_CHANNEL_ID}>.`,
+          flags: MessageFlags.Ephemeral
+        });
+
+        return;
+      }
+
       /* ---------------------------------------------
          PANEL BUTTON
          --------------------------------------------- */
@@ -1603,6 +1956,137 @@ client.on(
         return;
       }
 
+            /* ---------------------------------------------
+         PROFILE PANEL BUTTON
+         --------------------------------------------- */
+
+      if (
+        interaction.isButton() &&
+        interaction.customId === 'profile_create'
+      ) {
+
+        await interaction.showModal(
+          createProfileModal()
+        );
+
+        return;
+      }
+
+            /* ---------------------------------------------
+         PROFILE ADD PHOTO
+         --------------------------------------------- */
+
+      if (
+        interaction.isButton() &&
+        interaction.customId === 'profile_add_photo'
+      ) {
+
+        const data =
+          pendingProfiles.get(
+            interaction.user.id
+          );
+
+        if (!data) {
+
+          await interaction.reply({
+            content:
+              '❌ Дані анкети більше недоступні. Створіть анкету ще раз.',
+
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+          return;
+        }
+
+        waitingForProfilePhoto.set(
+          interaction.user.id,
+          true
+        );
+
+        await interaction.update({
+
+          content:
+            '📷 **Надішліть одне фото в цей канал.**\n\n' +
+            'Анкета поки що **не опублікована**.\n' +
+            'Після надсилання фото бот використає його для анкети.',
+
+          components: [
+
+            new ActionRowBuilder().addComponents(
+
+              new ButtonBuilder()
+                .setCustomId(
+                  'profile_cancel_photo'
+                )
+                .setLabel('Скасувати')
+                .setEmoji('❌')
+                .setStyle(
+                  ButtonStyle.Secondary
+                )
+
+            )
+
+          ]
+
+        });
+
+        return;
+      }
+
+      /* ---------------------------------------------
+         PROFILE CANCEL PHOTO
+         --------------------------------------------- */
+
+      if (
+        interaction.isButton() &&
+        interaction.customId === 'profile_cancel_photo'
+      ) {
+        const data =
+          pendingProfiles.get(
+            interaction.user.id
+          );
+
+        if (!data) {
+          await interaction.reply({
+            content:
+              '❌ Дані анкети більше недоступні. Створіть анкету ще раз.',
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+          return;
+        }
+
+        waitingForProfilePhoto.delete(
+          interaction.user.id
+        );
+
+        await interaction.update({
+          content:
+            '### 2/2 — Фото анкети\n\n' +
+            '📷 **Хочете додати фото до анкети?**\n\n' +
+            'Фото можна додати зараз або опублікувати анкету без нього.',
+          components: [
+            new ActionRowBuilder().addComponents(
+              new ButtonBuilder()
+                .setCustomId('profile_add_photo')
+                .setLabel('Додати фото')
+                .setEmoji('📷')
+                .setStyle(ButtonStyle.Primary),
+
+              new ButtonBuilder()
+                .setCustomId('profile_publish_no_photo')
+                .setLabel('Опублікувати без фото')
+                .setEmoji('➡️')
+                .setStyle(ButtonStyle.Success)
+            )
+          ]
+        });
+
+        return;
+      }
+      
       /* ---------------------------------------------
          HOLO-BATTLE PANEL BUTTON
          --------------------------------------------- */
@@ -1719,6 +2203,358 @@ client.on(
 
           flags: MessageFlags.Ephemeral
         });
+
+        return;
+      }
+
+      /* ---------------------------------------------
+         PROFILE MODAL SUBMIT
+         --------------------------------------------- */
+
+      if (
+        interaction.isModalSubmit() &&
+        interaction.customId === 'profile_form'
+      ) {
+
+        const nickname =
+          interaction.fields
+            .getTextInputValue('nickname')
+            .trim();
+
+        const aniimoId =
+          interaction.fields
+            .getTextInputValue('aniimo_id')
+            .trim();
+
+        const level =
+          interaction.fields
+            .getTextInputValue('level')
+            .trim();
+
+        const about =
+          interaction.fields
+            .getTextInputValue('about')
+            .trim();
+
+        pendingProfiles.set(
+          interaction.user.id,
+          {
+            userId:
+              interaction.user.id,
+
+            nickname,
+
+            aniimoId,
+
+            level,
+
+            about,
+
+            servers: []
+          }
+        );
+
+        await interaction.reply({
+
+          content:
+            '### 1/2 — Оберіть сервер(и)\n\nМожна обрати один або декілька серверів.',
+
+          components: [
+
+            createProfileServerSelect(),
+
+            new ActionRowBuilder().addComponents(
+
+              new ButtonBuilder()
+                .setCustomId('profile_next')
+                .setLabel('Далі')
+                .setStyle(
+                  ButtonStyle.Primary
+                )
+
+            )
+
+          ],
+
+          flags:
+            MessageFlags.Ephemeral
+        });
+
+        return;
+      }
+
+      /* ---------------------------------------------
+         PROFILE SERVER SELECT
+         --------------------------------------------- */
+
+      if (
+        interaction.isStringSelectMenu() &&
+        interaction.customId === 'profile_server'
+      ) {
+
+        const data =
+          pendingProfiles.get(
+            interaction.user.id
+          );
+
+        if (!data) {
+
+          await interaction.reply({
+            content:
+              '❌ Дані анкети більше недоступні. Створіть анкету ще раз.',
+
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+          return;
+        }
+
+        data.servers =
+          interaction.values;
+
+        await interaction.update({
+
+          content:
+            '### 1/2 — Оберіть сервер(и)\n\n' +
+            'Можна обрати один або декілька серверів.\n\n' +
+            `**Обрано:** ${data.servers.join(', ')}`,
+
+          components: [
+
+            createProfileServerSelect(),
+
+            new ActionRowBuilder().addComponents(
+
+              new ButtonBuilder()
+                .setCustomId('profile_next')
+                .setLabel('Далі')
+                .setStyle(
+                  ButtonStyle.Primary
+                )
+
+            )
+
+          ]
+
+        });
+
+        return;
+      }
+
+
+      /* ---------------------------------------------
+         PROFILE NEXT
+         --------------------------------------------- */
+
+      if (
+        interaction.isButton() &&
+        interaction.customId === 'profile_next'
+      ) {
+
+        const data =
+          pendingProfiles.get(
+            interaction.user.id
+          );
+
+        if (!data) {
+
+          await interaction.reply({
+            content:
+              '❌ Дані анкети більше недоступні. Створіть анкету ще раз.',
+
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+          return;
+        }
+
+        if (
+          !data.servers ||
+          data.servers.length === 0
+        ) {
+
+          await interaction.reply({
+            content:
+              '❌ Будь ласка, оберіть хоча б один сервер.',
+
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+          return;
+        }
+
+        await interaction.update({
+
+          content:
+            '### 2/2 — Фото анкети\n\n' +
+            '📷 **Хочете додати фото до анкети?**\n\n' +
+            'Фото можна додати зараз або опублікувати анкету без нього.',
+
+          components: [
+
+            new ActionRowBuilder().addComponents(
+
+              new ButtonBuilder()
+                .setCustomId('profile_add_photo')
+                .setLabel('Додати фото')
+                .setEmoji('📷')
+                .setStyle(
+                  ButtonStyle.Primary
+                ),
+
+              new ButtonBuilder()
+                .setCustomId('profile_publish_no_photo')
+                .setLabel('Опублікувати без фото')
+                .setEmoji('➡️')
+                .setStyle(
+                  ButtonStyle.Success
+                )
+
+            )
+
+          ]
+
+        });
+
+        return;
+      }
+
+      /* ---------------------------------------------
+         PROFILE DELETE
+         --------------------------------------------- */
+
+      if (
+        interaction.isButton() &&
+        interaction.customId.startsWith(
+          'profile_delete:'
+        )
+      ) {
+
+        const userId =
+          interaction.customId.split(':')[1];
+
+        if (
+          interaction.user.id !== userId
+        ) {
+
+          await interaction.reply({
+            content:
+              '❌ Видалити анкету може тільки її автор.',
+
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+          return;
+        }
+
+        const profile =
+          db.prepare(`
+            SELECT *
+            FROM profiles
+            WHERE user_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+          `).get(userId);
+
+        if (!profile) {
+
+          await interaction.reply({
+            content:
+              '❌ Анкету не знайдено.',
+
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+          return;
+        }
+
+        try {
+
+          await interaction.message.delete();
+
+          db.prepare(`
+            DELETE FROM profiles
+            WHERE id = ?
+          `).run(profile.id);
+
+          await interaction.reply({
+            content:
+              '🗑️ Вашу анкету видалено.',
+
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+        } catch (error) {
+
+          console.error(
+            'Failed to delete profile:',
+            error
+          );
+
+          await interaction.reply({
+            content:
+              '❌ Не вдалося видалити анкету.',
+
+            flags:
+              MessageFlags.Ephemeral
+          });
+        }
+
+        return;
+      }
+            /* ---------------------------------------------
+         PROFILE PUBLISH WITHOUT PHOTO
+         --------------------------------------------- */
+
+      if (
+        interaction.isButton() &&
+        interaction.customId === 'profile_publish_no_photo'
+      ) {
+
+        const data =
+          pendingProfiles.get(
+            interaction.user.id
+          );
+
+        if (!data) {
+
+          await interaction.reply({
+            content:
+              '❌ Дані анкети більше недоступні. Створіть анкету ще раз.',
+
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+          return;
+        }
+
+        if (
+          !data.servers ||
+          data.servers.length === 0
+        ) {
+
+          await interaction.reply({
+            content:
+              '❌ Будь ласка, оберіть хоча б один сервер.',
+
+            flags:
+              MessageFlags.Ephemeral
+          });
+
+          return;
+        }
+
+        await publishProfile(
+          data,
+          interaction
+        );
 
         return;
       }
@@ -3090,6 +3926,106 @@ setInterval(
   },
   30 * 1000
 );
+
+client.on('messageCreate', async message => {
+  try {
+    if (message.author.bot) return;
+
+    if (
+      message.channelId !==
+      process.env.PROFILE_CHANNEL_ID
+    ) {
+      return;
+    }
+
+    if (
+      !waitingForProfilePhoto.has(
+        message.author.id
+      )
+    ) {
+      return;
+    }
+
+    const data =
+      pendingProfiles.get(
+        message.author.id
+      );
+
+    if (!data) {
+      waitingForProfilePhoto.delete(
+        message.author.id
+      );
+      return;
+    }
+
+    const attachments =
+      [...message.attachments.values()];
+
+    const images =
+      attachments.filter(
+        attachment =>
+          attachment.contentType?.startsWith(
+            'image/'
+          ) ||
+          /\.(png|jpe?g|gif|webp)$/i.test(
+            attachment.name || ''
+          )
+      );
+
+    if (
+      attachments.length !== 1 ||
+      images.length !== 1
+    ) {
+      await message.delete().catch(() => {});
+
+      return;
+    }
+
+    const image = images[0];
+
+    const response =
+      await fetch(image.url);
+
+    if (!response.ok) {
+      throw new Error(
+        'Failed to download profile photo.'
+      );
+    }
+
+    const buffer =
+      Buffer.from(
+        await response.arrayBuffer()
+      );
+
+    const extension =
+      image.name?.includes('.')
+        ? image.name.slice(
+            image.name.lastIndexOf('.')
+          )
+        : '.png';
+
+    const fileName =
+      `profile-photo${extension}`;
+
+    const photoFile =
+      new AttachmentBuilder(buffer)
+        .setName(fileName);
+
+    await publishProfile(
+      data,
+      null,
+      photoFile
+    );
+
+    await message.delete().catch(() => {});
+
+  } catch (error) {
+    console.error(
+      'Profile photo error:',
+      error
+    );
+  }
+});
 
 client.login(
   process.env.DISCORD_TOKEN
